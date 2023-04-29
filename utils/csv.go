@@ -44,7 +44,7 @@ type CloudflareIPData struct {
 	*PingData
 	recvRate      float32
 	DownloadSpeed float64
-	jitter float64
+	Jitter float64
 }
 
 func (cf *CloudflareIPData) getRecvRate() float32 {
