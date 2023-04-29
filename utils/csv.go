@@ -44,6 +44,7 @@ type CloudflareIPData struct {
 	*PingData
 	recvRate      float32
 	DownloadSpeed float64
+	jitter float64
 }
 
 func (cf *CloudflareIPData) getRecvRate() float32 {
@@ -150,18 +151,18 @@ func (s DownloadSpeedSet) Print() {
 	if len(dateString) < PrintNum {  // 如果IP数组长度(IP数量) 小于  打印次数，则次数改为IP数量
 		PrintNum = len(dateString)
 	}
-	headFormat := "%-16s%-5s%-5s%-5s%-6s%-11s\n"
-	dataFormat := "%-18s%-8s%-8s%-8s%-10s%-15s\n"
+	headFormat := "%-16s%-5s%-5s%-5s%-6s%-11s%-6s\n"
+	dataFormat := "%-18s%-8s%-8s%-8s%-10s%-15s%-10s\n"
 	for i := 0; i < PrintNum; i++ { // 如果要输出的 IP 中包含 IPv6，那么就需要调整一下间隔
 		if len(dateString[i][0]) > 15 {
-			headFormat = "%-40s%-5s%-5s%-5s%-6s%-11s\n"
-			dataFormat = "%-42s%-8s%-8s%-8s%-10s%-15s\n"
+			headFormat = "%-40s%-5s%-5s%-5s%-6s%-11s%-6s\n"
+			dataFormat = "%-42s%-8s%-8s%-8s%-10s%-15s%-10s\n"
 			break
 		}
 	}
-	fmt.Printf(headFormat, "IP 地址", "已发送", "已接收", "丢包率", "平均延迟", "下载速度 (MB/s)")
+	fmt.Printf(headFormat, "IP 地址", "已发送", "已接收", "丢包率", "平均延迟", "下载速度 (MB/s)", "Jitter")
 	for i := 0; i < PrintNum; i++ {
-		fmt.Printf(dataFormat, dateString[i][0], dateString[i][1], dateString[i][2], dateString[i][3], dateString[i][4], dateString[i][5])
+		fmt.Printf(dataFormat, dateString[i][0], dateString[i][1], dateString[i][2], dateString[i][3], dateString[i][4], dateString[i][5],dateString[i][6])
 	}
 	if !noOutput() {
 		fmt.Printf("\n完整测速结果已写入 %v 文件，可使用记事本/表格软件查看。\n", Output)

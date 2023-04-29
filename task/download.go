@@ -75,7 +75,8 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	bar := utils.NewBar(TestCount, bar_b, "")
 	for i := 0; i < testNum; i++ {
 		speed := downloadHandler(ipSet[i].IP)
-		ipSet[i].DownloadSpeed = speed
+		ipSet[i].DownloadSpeed = speed[0]
+		ipSet[i].jitter = speed[1]
 		// 在每个 IP 下载测速后，以 [下载速度下限] 条件过滤结果
 		if speed >= MinSpeed*1024*1024 {
 			bar.Grow(1, "")
@@ -107,77 +108,89 @@ func getDialContext(ip *net.IPAddr) func(ctx context.Context, network, address s
 }
 
 // return download Speed
-func downloadHandler(ip *net.IPAddr) float64 {
-	client := &http.Client{
-		Transport: &http.Transport{DialContext: getDialContext(ip)},
-		Timeout:   Timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) > 10 { // 限制最多重定向 10 次
-				return http.ErrUseLastResponse
-			}
-			if req.Header.Get("Referer") == defaultURL { // 当使用默认下载测速地址时，重定向不携带 Referer
-				req.Header.Del("Referer")
-			}
-			return nil
-		},
-	}
-	req, err := http.NewRequest("GET", URL, nil)
-	if err != nil {
-		return 0.0
-	}
+func downloadAndJitter(ip *net.IPAddr) (float64, float64) {
+    client := &http.Client{
+        Transport: &http.Transport{DialContext: getDialContext(ip)},
+        Timeout:   Timeout,
+        CheckRedirect: func(req *http.Request, via []*http.Request) error {
+            if len(via) > 10 { // 限制最多重定向 10 次
+                return http.ErrUseLastResponse
+            }
+            if req.Header.Get("Referer") == defaultURL { // 当使用默认下载测速地址时，重定向不携带 Referer
+                req.Header.Del("Referer")
+            }
+            return nil
+        },
+    }
+    req, err := http.NewRequest("GET", URL, nil)
+    if err != nil {
+        return 0.0, 0.0
+    }
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.80 Safari/537.36")
+    req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.80 Safari/537.36")
 
-	response, err := client.Do(req)
-	if err != nil {
-		return 0.0
-	}
-	defer response.Body.Close()
-	if response.StatusCode != 200 {
-		return 0.0
-	}
-	timeStart := time.Now()           // 开始时间（当前）
-	timeEnd := timeStart.Add(Timeout) // 加上下载测速时间得到的结束时间
+    response, err := client.Do(req)
+    if err != nil {
+        return 0.0, 0.0
+    }
+    defer response.Body.Close()
+    if response.StatusCode != 200 {
+        return 0.0, 0.0
+    }
+    timeStart := time.Now()           // 开始时间（当前）
+    timeEnd := timeStart.Add(Timeout) // 加上下载测速时间得到的结束时间
 
-	contentLength := response.ContentLength // 文件大小
-	buffer := make([]byte, bufferSize)
+    contentLength := response.ContentLength // 文件大小
+    buffer := make([]byte, bufferSize)
 
-	var (
-		contentRead     int64 = 0
-		timeSlice             = Timeout / 100
-		timeCounter           = 1
-		lastContentRead int64 = 0
-	)
+    var (
+        contentRead     int64 = 0
+        timeSlice             = Timeout / 100
+        timeCounter           = 1
+        lastContentRead int64 = 0
+        j                   float64
+    )
 
-	var nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
-	e := ewma.NewMovingAverage()
+    var nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
+    e := ewma.NewMovingAverage()
 
-	// 循环计算，如果文件下载完了（两者相等），则退出循环（终止测速）
-	for contentLength != contentRead {
-		currentTime := time.Now()
-		if currentTime.After(nextTime) {
+    // 循环计算，如果文件下载完了（两者相等），则退出循环（终止测速）
+    for contentLength != contentRead {
+        currentTime := time.Now()
+        if currentTime.After(nextTime) {
+            timeCounter++
+            nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
+            e.Add(float64(contentRead - lastContentRead))
+            lastContentRead = contentRead
+        }
+        // 如果超出下载测速时间，则退出循环（终止测速）
+        if currentTime.After(timeEnd) {
+            break
+        }
+        bufferRead, err := response.Body.Read(buffer)
+        if err != nil {
+            if err != io.EOF { // 如果文件下载过程中遇到报错（如 Timeout），且并不是因为文件下载完了，则退出循环（终止测速）
+                break
+            } else if contentLength == -1 { // 文件下载完成 且 文件大小未知，则退出循环（终止测速），例如：https://speed.cloudflare.com/__down?bytes=200000000 这样的，如果在 10 秒内就下载完成了，会导致测速结果明显偏低甚至显示为 0.00（下载速度太快时）
+                break
+            }
+            // 获取上个时间片
 			timeCounter++
 			nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
 			e.Add(float64(contentRead - lastContentRead))
 			lastContentRead = contentRead
+			continue
 		}
-		// 如果超出下载测速时间，则退出循环（终止测速）
-		if currentTime.After(timeEnd) {
-			break
-		}
-		bufferRead, err := response.Body.Read(buffer)
-		if err != nil {
-			if err != io.EOF { // 如果文件下载过程中遇到报错（如 Timeout），且并不是因为文件下载完了，则退出循环（终止测速）
-				break
-			} else if contentLength == -1 { // 文件下载完成 且 文件大小未知，则退出循环（终止测速），例如：https://speed.cloudflare.com/__down?bytes=200000000 这样的，如果在 10 秒内就下载完成了，会导致测速结果明显偏低甚至显示为 0.00（下载速度太快时）
-				break
-			}
-			// 获取上个时间片
-			last_time_slice := timeStart.Add(timeSlice * time.Duration(timeCounter-1))
-			// 下载数据量 / (用当前时间 - 上个时间片/ 时间片)
-			e.Add(float64(contentRead-lastContentRead) / (float64(currentTime.Sub(last_time_slice)) / float64(timeSlice)))
-		}
+	
 		contentRead += int64(bufferRead)
+		// 模拟下载速度抖动（Jitter）
+		jitter := time.Duration(rand.Intn(int(jitterRange))) * time.Millisecond
+		time.Sleep(downloadDelay + jitter)
+	
 	}
-	return e.Value() / (Timeout.Seconds() / 120)
-}
+	// 计算下载速度和测速时间
+	speed := e.Value() / 1024 / 1024 / 10 // 每秒下载的数据量，转换为 MB/s
+	duration := time.Since(timeStart).Seconds()
+	
+	return speed, duration
+}	
