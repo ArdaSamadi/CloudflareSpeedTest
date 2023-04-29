@@ -74,9 +74,9 @@ func TestDownloadSpeed(ipSet utils.PingDelaySet) (speedSet utils.DownloadSpeedSe
 	}
 	bar := utils.NewBar(TestCount, bar_b, "")
 	for i := 0; i < testNum; i++ {
-		speed := downloadAndJitter(ipSet[i].IP)
+		speed := downloadHandler(ipSet[i].IP)
 		ipSet[i].DownloadSpeed = speed[0]
-		ipSet[i].jitter = speed[1]
+		ipSet[i].Jitter = speed[1]
 		// 在每个 IP 下载测速后，以 [下载速度下限] 条件过滤结果
 		if speed >= MinSpeed*1024*1024 {
 			bar.Grow(1, "")
@@ -108,7 +108,7 @@ func getDialContext(ip *net.IPAddr) func(ctx context.Context, network, address s
 }
 
 // return download Speed
-func downloadAndJitter(ip *net.IPAddr) (float64, float64) {
+func downloadHandler(ip *net.IPAddr) [2]float64 {
     client := &http.Client{
         Transport: &http.Transport{DialContext: getDialContext(ip)},
         Timeout:   Timeout,
@@ -148,11 +148,11 @@ func downloadAndJitter(ip *net.IPAddr) (float64, float64) {
         timeSlice             = Timeout / 100
         timeCounter           = 1
         lastContentRead int64 = 0
-        j                   float64
     )
 
     var nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
     e := ewma.NewMovingAverage()
+    var sqSum float64 = 0.0 // Initialize the squared sum of differences variable to zero
 
     // 循环计算，如果文件下载完了（两者相等），则退出循环（终止测速）
     for contentLength != contentRead {
@@ -173,24 +173,18 @@ func downloadAndJitter(ip *net.IPAddr) (float64, float64) {
                 break
             } else if contentLength == -1 { // 文件下载完成 且 文件大小未知，则退出循环（终止测速），例如：https://speed.cloudflare.com/__down?bytes=200000000 这样的，如果在 10 秒内就下载完成了，会导致测速结果明显偏低甚至显示为 0.00（下载速度太快时）
                 break
-            }
-            // 获取上个时间片
-			timeCounter++
-			nextTime = timeStart.Add(timeSlice * time.Duration(timeCounter))
-			e.Add(float64(contentRead - lastContentRead))
-			lastContentRead = contentRead
-			continue
+				} else if time.Now().Sub(start).Seconds() > Timeout.Seconds() { // 如果超时则退出循环（终止测速）
+					break
+				}
+			}
 		}
-	
-		contentRead += int64(bufferRead)
-		// 模拟下载速度抖动（Jitter）
-		jitter := time.Duration(rand.Intn(int(jitterRange))) * time.Millisecond
-		time.Sleep(downloadDelay + jitter)
-	
+		endTime := time.Now()
+		duration := endTime.Sub(start)
+		fileSizeMB := float64(fileSize) / 1024 / 1024
+		downloadSpeedMBps := float64(bytesDownloaded) / 1024 / 1024 / duration.Seconds()
+		downloadSpeedMbps := downloadSpeedMBps * 8
+		jitter := math.Abs(downloadSpeedMBps-downloadSpeedLastMBps) / downloadSpeedMBps * 100
+		downloadSpeedLastMBps = downloadSpeedMBps
+		return [2]float64{downloadSpeedMbps, jitter}
 	}
-	// 计算下载速度和测速时间
-	speed := e.Value() / 1024 / 1024 / 10 // 每秒下载的数据量，转换为 MB/s
-	duration := time.Since(timeStart).Seconds()
 	
-	return speed, duration
-}	
